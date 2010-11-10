@@ -7,8 +7,12 @@ Author: Virgile Fritsch, 2010
 """
 import numpy as np
 from scipy import linalg
+from scipy.stats import chi2
 import glob
 from nipy.io.imageformats import load
+import matplotlib.pyplot as plt
+
+from fast_mcd import fast_mcd
 
 #---------------------------------------------------------------
 #----- Parameters ----------------------------------------------
@@ -24,7 +28,7 @@ FUNCTIONAL_TASK = "GCA"
 CONTRAST = 13
 
 #----- Atlas type ("cortical", "subcortical", or "functional")
-ATLAS_TYPE = "cortical"
+ATLAS_TYPE = "subcortical"
 
 #---------------------------------------------------------------
 #----- Routines ------------------------------------------------
@@ -120,28 +124,55 @@ nonan_mask = np.isnan(allsummary).sum(1) == 0
 fallsummary = allsummary[nonan_mask,:]
 # --------> /!\ fixme: find a better way to trim
 # per ROI trimmed-list of subjects (10 each side)
-"""
 M = np.argsort(fallsummary, 0)[10:-10]
 trimmed_ind = reduce(np.intersect1d, M.T)
 trimmed_allsummary = fallsummary[trimmed_ind]
 del M
-"""
-trimmed_allsummary = fallsummary
+#trimmed_allsummary = fallsummary
 
 # SVD decomposition of the covariance matrix
-u, s, vh = linalg.svd(np.cov(trimmed_allsummary))
+covariance = np.cov(trimmed_allsummary.T)
+robust_location, robust_covariance = fast_mcd(fallsummary)
+u, s, vh = linalg.svd(robust_covariance)
 # --------> /!\ fixme: look at that criterion (75%)
 # keep only 75% of the covariance
 inv_s = (1. / s) * \
-       ((np.cumsum(s) < np.sum(s) * .75) | ([True]+[False]*(len(s)-1)))
+        ((np.cumsum(s) < np.sum(s) * .95) | ([True]+[False]*(len(s)-1)))
 inv_sigma = np.dot(np.dot(vh.T, np.diag(inv_s)), u.T)
 
 # --------> /!\ fixme: median ?
-Y = fallsummary - np.median(fallsummary, 0)
-R = np.sqrt(np.dot(np.dot(Y.T, inv_sigma), Y).sum(1))
-R[np.isnan(R)] = 0.
-
-sortedR = R.copy()
+# compute Mahalanobis distances
+Y = fallsummary - robust_location
+#Y = fallsummary - np.mean(fallsummary, 0)
+R = np.sqrt((np.dot(Y, inv_sigma) * Y).sum(1))
+# find outliers threshold
+sortedR = R[~np.isnan(R)].copy()
 sortedR.sort()
-qi, qe, qa = np.outer(len(R), [0.25, 0.5, 0.75]) [0]
-bnd = np.abs(sortedR[qa] - sortedR[qi])*3 + sortedR[qe]
+qi, qe, qa = np.outer(len(sortedR), [0.25, 0.5, 0.75])[0]
+bnd = (sortedR[qa] - sortedR[qi])*3 + sortedR[qe]
+
+### Estimate the density with a gaussian kernel
+nonnan_subjects_arg = np.where(~np.isnan(R))[0]
+R = R[nonnan_subjects_arg]
+x = np.arange(0., 1.2*np.amax(R), 0.0012*np.amax(R))
+n = R.size
+sigma = 1.05 * np.std(R) * n**(-0.2)
+kernel_arg = (np.tile(x, (n,1)).T - R) / sigma
+fh = ((1/np.sqrt(2*np.pi)) * np.exp(-0.5*kernel_arg**2)).sum(1) / (n*sigma)
+# print it
+plt.figure()
+plt.plot(x, fh)
+plt.vlines(sortedR[qe], 0, np.amax(fh))
+plt.vlines(bnd, 0, np.amax(fh))
+# Khi-2 distribution
+p = labels.size
+diff_scale = np.sqrt(R.var() / float(chi2.stats(p, moments='v')))
+diff_loc = R.mean() - float(chi2.stats(p, scale=diff_scale, moments='m'))
+template = chi2(p, loc=diff_loc, scale=diff_scale)
+plt.plot(x, template.pdf(x), linestyle='--', color='green')
+plt.show()
+
+
+
+for i in np.where(R > bnd)[0]:
+    print actual_files[nonnan_subjects_arg[i]][26:38]

@@ -8,6 +8,7 @@ Author: Virgile Fritsch, 2010
         for Quality, TECHNOMETRICS)
 
 """
+from joblib import Parallel, delayed
 import numpy as np
 from scipy import linalg
 
@@ -66,16 +67,30 @@ def run_fast_mcd(data, h, nb_trials, select=10, nb_iter=2):
     """
     n_sub = data.shape[0]
     p = data.shape[1]
-    detSsub = np.zeros(nb_trials)
-    all_Tsub = np.zeros((nb_trials, p))
-    all_Ssub = np.zeros((nb_trials, p, p))
+    all_Tsub = []
+    all_Ssub = []
+    detSsub = []
+    """
     for t in range(nb_trials):
         permutation = np.random.permutation(n_sub)
-        all_Tsub[t,:], all_Ssub[t,:,:], detSsub[t], iteration = c_step(
+        Tsub_temp, Ssub_temp, detSsub_temp, iteration = c_step(
             data, permutation[:h], nb_iter=nb_iter)
+        all_Tsub.append(Tsub_temp)
+        all_Ssub.append(Ssub_temp)
+        detSsub.append(detSsub_temp)
+    """
     
-    best = np.argsort(detSsub)[:select]
-    return all_Tsub[best,:], all_Ssub[best,:,:]
+    all_Tsub, all_Ssub, detSsub, _ = zip(
+        *[c_step(data, np.random.permutation(n_sub)[:h],nb_iter=nb_iter) \
+         for t in range(nb_trials)])
+    
+    best_T = []
+    best_S = []
+    for i in np.argsort(detSsub)[:select]:
+        best_T.append(all_Tsub[i])
+        best_S.append(all_Ssub[i])
+    
+    return best_T, best_S
 
 
 def fast_mcd(data):
@@ -92,64 +107,55 @@ def fast_mcd(data):
         # perform a total of 500 trials, select 10 best (T,S) for each subset
         nb_best = 10
         nb_trials = int(500 / nb_subsets)
+        h_subsets = np.ceil(n_sub*(n/h))
         permutation = np.random.permutation(n)
-        best_T = np.zeros((nb_subsets*nb_best, p))
-        best_S = np.zeros((nb_subsets*nb_best, p, p))
-        for i in range(nb_subsets):
-            permutation_slice = np.arange(i*n_sub, (i+1)*n_sub, dtype=int)
-            subset = data[permutation[permutation_slice,:]]
-            ind_range = np.arange(i*nb_best, (i+1)*nb_best)
-            best_T[ind_range,:], best_S[ind_range,:,:] = run_fast_mcd(
-                    subset, np.ceil(n_sub*(n/h)), nb_trials, select=nb_best)
+        all_best_T, all_best_S = zip(*Parallel(n_jobs=-1, verbose=0)(
+            delayed(run_fast_mcd)(
+            data[permutation[np.arange(i*n_sub, (i+1)*n_sub, dtype=int),:]],
+            h_subsets, nb_trials, select=nb_best) \
+            for i in range(nb_subsets)))
+        all_best_T = reduce(list.__add__, list(all_best_T))
+        all_best_S = reduce(list.__add__, list(all_best_S))
         # pool the subsets into a merged set (possibly the full dataset)
         n_merged = min(1500,n)
         merged_subset = data[np.random.permutation(n)[:n_merged],:]
-        T_merged = np.zeros((best_T.shape[0], p))
-        S_merged = np.zeros((best_T.shape[0], p, p))
-        detS_merged = np.zeros(best_T.shape[0])
-        for i in range(best_T.shape[0]):
-            # /!\ another function here to run the loop ?
-            T_merged[i,:], S_merged[i,:,:], detS_merged[i], iteration = \
-                c_step_from_estimates(merged_subset, np.ceil(n_merged*(n/h)),
-                                      best_T[i,:], best_S[i,:])
-            if DEBUG:
-                print i, detS_merged[i]
-        del best_T, best_S
+        h_merged = np.ceil(n_merged*(n/h))
+        T_merged, S_merged, detS_merged, _ = zip(*Parallel(n_jobs=-1)(
+            delayed(c_step_from_estimates)(
+            merged_subset, h_merged, all_best_T[i], all_best_S[i]) \
+            for i in range(len(all_best_T))))
+                                          
         if n < 1500:
             # get the best couple (T,S)
             result_index = np.argmin(detS_merged)
-            T = T_merged[result_index,:]
-            S = S_merged[result_index,:,:]
+            T = T_merged[result_index]
+            S = S_merged[result_index]
         else:
             # find the 10 best couple (T,S) on the merged set
             nb_best_merged = 10
             best_merged_indices = np.argsort(detS_merged)
-            T_best_merged = T_merged[best_merged_indices,:]
-            S_best_merged = S_merged[best_merged_indices,:,:]
-            del T_merged, S_merged
+            T_best_merged = []
+            S_best_merged = []
+            for i in range(best_merged_indices):
+                T_best_merged.append(T_merged[i])
+                S_best_merged.append(S_merged[i])
             # select the best couple on the full dataset amongst the 10
-            T_full = np.zeros((nb_best_merged, p))
-            S_full = np.zeros((nb_best_merged, p, p))
-            detS_full = np.zeros(nb_best_merged)
-            for i in range(nb_best_merged):
-                T_full[i,:], S_full[i,:,:], detS_full[i], iterations = \
-                    c_step_from_estimates(data, h, T_best_merged[i,:],
-                                          S_best_merged[i,:])
+            T_full, S_full, detS_full, _ = zip(*Parallel(n_jobs=-1)(
+                delayed(c_step_from_estimates)(
+                data, h, T_best_merged[i], S_best_merged[i]) \
+                for i in range(nb_best_merged)))
             result_index = np.argmin(detS_full)
-            T = T_full[result_index,:]
-            S = S_full[result_index,:,:]
+            T = T_full[result_index]
+            S = S_full[result_index]
     else:
         # find the 10 best couple (T,S) considering two iterations
         nb_trials = 500
         nb_best = 10
         T_best, S_best = run_fast_mcd(data, h, nb_trials, select=nb_best)
         # select the best couple on the full dataset amongst the 10
-        T_full = np.zeros((nb_best, p))
-        S_full = np.zeros((nb_best, p, p))
-        detS_full = np.zeros(nb_best)
-        for i in range(nb_best):
-            T_full[i,:], S_full[i,:,:], detS_full[i], iterations = \
-                c_step_from_estimates(data, h, T_best[i,:], S_best[i,:])
+        T_full, S_full, detS_full, _ = zip(*Parallel(n_jobs=-1)(
+            delayed(c_step_from_estimates)(
+            data, h, T_best[i], S_best[i]) for i in range(nb_best_merged)))
         result_index = np.argmin(detS_full)
         T = T_full[result_index,:]
         S = S_full[result_index,:,:]

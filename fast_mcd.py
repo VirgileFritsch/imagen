@@ -60,7 +60,7 @@ def c_step(data, H, nb_iter=30, previous_detS=None):
     return result
 
 
-def run_fast_mcd(data, h, nb_trials, select=10):
+def run_fast_mcd(data, h, nb_trials, select=10, nb_iter=2):
     """
     
     """
@@ -72,7 +72,7 @@ def run_fast_mcd(data, h, nb_trials, select=10):
     for t in range(nb_trials):
         permutation = np.random.permutation(n_sub)
         all_Tsub[t,:], all_Ssub[t,:,:], detSsub[t], iteration = c_step(
-            data, permutation[:h], nb_iter=2)
+            data, permutation[:h], nb_iter=nb_iter)
     
     best = np.argsort(detSsub)[:select]
     return all_Tsub[best,:], all_Ssub[best,:,:]
@@ -132,13 +132,26 @@ def fast_mcd(data):
             S_full = np.zeros((nb_best_merged, p, p))
             detS_full = np.zeros(nb_best_merged)
             for i in range(nb_best_merged):
-                T_full[i,:], S_full[i,:,:], detS_full[i] = \
+                T_full[i,:], S_full[i,:,:], detS_full[i], iterations = \
                     c_step_from_estimates(data, h, T_best_merged[i,:],
                                           S_best_merged[i,:])
             result_index = np.argmin(detS_full)
             T = T_full[result_index,:]
             S = S_full[result_index,:,:]
     else:
-        pass
+        # find the 10 best couple (T,S) considering two iterations
+        nb_trials = 500
+        nb_best = 10
+        T_best, S_best = run_fast_mcd(data, h, nb_trials, select=nb_best)
+        # select the best couple on the full dataset amongst the 10
+        T_full = np.zeros((nb_best, p))
+        S_full = np.zeros((nb_best, p, p))
+        detS_full = np.zeros(nb_best)
+        for i in range(nb_best):
+            T_full[i,:], S_full[i,:,:], detS_full[i], iterations = \
+                c_step_from_estimates(data, h, T_best[i,:], S_best[i,:])
+        result_index = np.argmin(detS_full)
+        T = T_full[result_index,:]
+        S = S_full[result_index,:,:]
     
     return T, S
